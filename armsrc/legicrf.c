@@ -73,7 +73,6 @@ static void setup_timer(void)
 #define SIM_DIVISOR  586   /* prng_time/SIM_DIVISOR count prng needs to be forwared */
 #define SIM_SHIFT    900   /* prng_time+SIM_SHIFT shift of delayed start */
 
-#define SESSION_IV 0x55
 #define OFFSET_LOG 1024
 
 #define FUZZ_EQUAL(value, target, fuzz) ((value) > ((target)-(fuzz)) && (value) < ((target)+(fuzz)))
@@ -303,9 +302,9 @@ static uint32_t perform_setup_phase_rwd(int iv)
 
 	frame_clean(&current_frame);
 	frame_receive_rwd(&current_frame, 6, 1);
-	legic_prng_forward(1); /* we wait anyways */
+	legic_prng_forward(3); /* we wait anyways */
 	while(timer->TC_CV < 387) ; /* ~ 258us */
-	frame_send_rwd(0x19, 6);
+	frame_send_rwd(0x39, 6);
 
 	return current_frame.data;
 }
@@ -346,7 +345,6 @@ static int LegicCRC(int byte_index, int value, int cmd_sz) {
 int legic_read_byte(int byte_index, int cmd_sz) {
 	int byte;
 
-	legic_prng_forward(4); /* we wait anyways */
 	while(timer->TC_CV < 387) ; /* ~ 258us + 100us*delay */
 
 	frame_send_rwd(1 | (byte_index << 1), cmd_sz);
@@ -361,6 +359,7 @@ int legic_read_byte(int byte_index, int cmd_sz) {
 		return -1;
 	}
 
+	legic_prng_forward(4); /* we wait anyways */
 	return byte;
 }
 
@@ -422,7 +421,7 @@ int legic_write_byte(int byte, int addr, int addr_sz) {
 	return -1;
 }
 
-int LegicRfReader(int offset, int bytes) {
+int LegicRfReader(int iv, int offset, int bytes) {
 	int byte_index=0, cmd_sz=0, card_sz=0;
 
 	LegicCommonInit();
@@ -431,7 +430,7 @@ int LegicRfReader(int offset, int bytes) {
 	memset(BigBuf, 0, 1024);
 
 	DbpString("setting up legic card");
-	uint32_t tag_type = perform_setup_phase_rwd(SESSION_IV);
+	uint32_t tag_type = perform_setup_phase_rwd(iv);
 	switch_off_tag_rwd(); //we lose to mutch time with dprintf
 	switch(tag_type) {
 		case 0x1d:
@@ -455,7 +454,9 @@ int LegicRfReader(int offset, int bytes) {
 		bytes = card_sz-offset;
 	}
 
-	perform_setup_phase_rwd(SESSION_IV);
+	perform_setup_phase_rwd(iv);
+
+	legic_prng_forward(2);
 
 	LED_B_ON();
 	while(byte_index < bytes) {
@@ -480,14 +481,14 @@ int LegicRfReader(int offset, int bytes) {
     return 0;
 }
 
-void LegicRfWriter(int bytes, int offset) {
+void LegicRfWriter(int bytes, int offset, int iv) {
 	int byte_index=0, addr_sz=0;
 	uint8_t *BigBuf = BigBuf_get_addr();
 
 	LegicCommonInit();
 	
 	DbpString("setting up legic card");
-	uint32_t tag_type = perform_setup_phase_rwd(SESSION_IV);
+	uint32_t tag_type = perform_setup_phase_rwd(iv);
 	switch_off_tag_rwd();
 	switch(tag_type) {
 		case 0x1d:
@@ -512,8 +513,7 @@ void LegicRfWriter(int bytes, int offset) {
 	}
 
     LED_B_ON();
-	perform_setup_phase_rwd(SESSION_IV);
-    legic_prng_forward(2);
+	perform_setup_phase_rwd(iv);
 	while(byte_index < bytes) {
 		int r = legic_write_byte(BigBuf[byte_index+offset], byte_index+offset, addr_sz);
 		if((r != 0) || BUTTON_PRESS()) {
@@ -541,7 +541,7 @@ static void frame_handle_tag(struct legic_frame const * const f)
 
    /* First Part of Handshake (IV) */
    if(f->bits == 7) {
-     if(f->data == SESSION_IV) {
+//     if(f->data == SESSION_IV) {
         LED_C_ON();
         prng_timer->TC_CCR = AT91C_TC_SWTRG;
         legic_prng_init(f->data);
@@ -556,17 +556,19 @@ static void frame_handle_tag(struct legic_frame const * const f)
         while(timer->TC_CV > 1);
         while(timer->TC_CV < 280);
         return;
-      } else if((prng_timer->TC_CV % 50) > 40) {
-        legic_prng_init(f->data);
-        frame_send_tag(0x3d, 6, 1);
-        SpinDelay(20);
-        return;
-     }
+//      } else if((prng_timer->TC_CV % 50) > 40) {
+//        legic_prng_init(f->data);
+//        frame_send_tag(0x3d, 6, 1);
+//        SpinDelay(20);
+//        return;
+//     }
    }
 
    /* 0x19==??? */
    if(legic_state == STATE_IV) {
-      if((f->bits == 6) && (f->data == (0x19 ^ get_key_stream(1, 6)))) {
+      int local_key = get_key_stream(3, 6);
+      int xored = 0x39 ^ local_key;
+      if((f->bits == 6) && (f->data == xored)) {
          legic_state = STATE_CON;
 
          /* TIMEOUT */
@@ -577,7 +579,7 @@ static void frame_handle_tag(struct legic_frame const * const f)
       } else {
          legic_state = STATE_DISCON;
          LED_C_OFF();
-         Dbprintf("0x19 - Frame: %03.3x", f->data);
+         Dbprintf("iv: %02x frame: %02x key: %02x xored: %02x", legic_prng_iv, f->data, local_key, xored);
          return;
       }
    }
@@ -585,7 +587,7 @@ static void frame_handle_tag(struct legic_frame const * const f)
    /* Read */
    if(f->bits == 11) {
       if(legic_state == STATE_CON) {
-         int key   = get_key_stream(-1, 11); //legic_phase_drift, 11);
+         int key   = get_key_stream(2, 11); //legic_phase_drift, 11);
          int addr  = f->data ^ key; addr = addr >> 1;
          int data = BigBuf[addr];
          int hash = LegicCRC(addr, data, 11) << 8;
@@ -600,7 +602,7 @@ static void frame_handle_tag(struct legic_frame const * const f)
          /* SHORT TIMEOUT */
          timer->TC_CCR = AT91C_TC_SWTRG;
          while(timer->TC_CV > 1);
-         legic_prng_forward(legic_frame_drift);
+         legic_prng_forward(2);
          while(timer->TC_CV < 180);
          return;
       }
@@ -680,14 +682,14 @@ void LegicRfSimulate(int phase, int frame, int reqresp)
    * seems to be 300us-ish.
    */
 
-   if(phase < 0) {
-      int i;
-      for(i=0; i<=reqresp; i++) {
-         legic_prng_init(SESSION_IV);
-         Dbprintf("i=%u, key 0x%3.3x", i, get_key_stream(i, frame));
-      }
-      return;
-   }
+//   if(phase < 0) {
+//      int i;
+//      for(i=0; i<=reqresp; i++) {
+//         legic_prng_init(SESSION_IV);
+//         Dbprintf("i=%u, key 0x%3.3x", i, get_key_stream(i, frame));
+//      }
+//      return;
+//   }
 
    legic_phase_drift = phase;
    legic_frame_drift = frame;

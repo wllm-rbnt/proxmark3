@@ -1088,11 +1088,11 @@ void UsbPacketReceived(uint8_t *packet, int len)
 			break;
 
 		case CMD_WRITER_LEGIC_RF:
-			LegicRfWriter(c->arg[1], c->arg[0]);
+			LegicRfWriter(c->arg[1], c->arg[0], c->arg[2]);
 			break;
 
 		case CMD_READER_LEGIC_RF:
-			LegicRfReader(c->arg[0], c->arg[1]);
+			LegicRfReader(c->arg[0], c->arg[1], c->arg[2]);
 			break;
 #endif
 

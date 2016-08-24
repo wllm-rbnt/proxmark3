@@ -23,11 +23,11 @@ static command_t CommandTable[] =
 {
   {"help",        CmdHelp,        1, "This help"},
   {"decode",      CmdLegicDecode, 0, "Display deobfuscated and decoded LEGIC RF tag data (use after hf legic reader)"},
-  {"reader",      CmdLegicRFRead, 0, "[offset [length]] -- read bytes from a LEGIC card"},
+  {"reader",      CmdLegicRFRead, 0, "[iv [offset [length]]] -- read bytes from a LEGIC card"},
   {"save",        CmdLegicSave,   0, "<filename> [<length>] -- Store samples"},
   {"load",        CmdLegicLoad,   0, "<filename> -- Restore samples"},
   {"sim",         CmdLegicRfSim,  0, "[phase drift [frame drift [req/resp drift]]] Start tag simulator (use after load or read)"},
-  {"write",       CmdLegicRfWrite,0, "<offset> <length> -- Write sample buffer (user after load or read)"},
+  {"write",       CmdLegicRfWrite,0, "<offset> <length> [<iv>]-- Write sample buffer (user after load or read)"},
   {"fill",        CmdLegicRfFill, 0, "<offset> <length> <value> -- Fill/Write tag with constant value"},
   {NULL, NULL, 0, NULL}
 };
@@ -58,7 +58,7 @@ int CmdLegicDecode(const char *Cmd)
   int crc = 0;
   int wrp = 0;
   int wrc = 0;
-  uint8_t data_buf[1052]; // receiver buffer
+  uint8_t data_buf[1024]; // receiver buffer
   char out_string[3076]; // just use big buffer - bad practice
   char token_type[4];
   
@@ -207,11 +207,13 @@ int CmdLegicDecode(const char *Cmd)
 
 int CmdLegicRFRead(const char *Cmd)
 {
-  int byte_count=0,offset=0;
-  sscanf(Cmd, "%i %i", &offset, &byte_count);
+  int iv=0x55,byte_count=0,offset=0;
+  sscanf(Cmd, "%i %i %i", &iv, &offset, &byte_count);
   if(byte_count == 0) byte_count = -1;
   if(byte_count + offset > 1024) byte_count = 1024 - offset;
-  UsbCommand c={CMD_READER_LEGIC_RF, {offset, byte_count, 0}};
+  iv = iv & 0x7F;
+  printf("Current iv: 0x%02x\n", iv);
+  UsbCommand c={CMD_READER_LEGIC_RF, {iv, offset, byte_count}};
   SendCommand(&c);
   return 0;
 }
@@ -330,12 +332,15 @@ int CmdLegicRfSim(const char *Cmd)
 
 int CmdLegicRfWrite(const char *Cmd)
 {
+    int iv=0x55;
     UsbCommand c={CMD_WRITER_LEGIC_RF};
-    int res = sscanf(Cmd, " 0x%"llx" 0x%"llx, &c.arg[0], &c.arg[1]);
-	if(res != 2) {
-		PrintAndLog("Please specify the offset and length as two hex strings");
+    int res = sscanf(Cmd, " 0x%"llx" 0x%"llx" %i", &c.arg[0], &c.arg[1], &iv);
+	if(res < 2) {
+		PrintAndLog("Please specify the offset and length as two hex strings, and, optionally, the iv also as an hex string");
         return -1;
     }
+    printf("Current iv: 0x%02x\n", iv);
+    c.arg[2] = iv & 0x7F;
     SendCommand(&c);
     return 0;
 }
